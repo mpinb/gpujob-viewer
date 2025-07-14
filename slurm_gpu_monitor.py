@@ -26,7 +26,7 @@ class SlurmGPUMonitor:
     def get_running_jobs(self):
         """Get running GPU jobs for the specified user"""
         try:
-            cmd = f"squeue -u {self.username} -o '%A %T %N %P' --noheader"
+            cmd = f"squeue -u {self.username} -o '%A %T %N %P %j' --noheader"
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
             
             if result.returncode != 0:
@@ -38,15 +38,28 @@ class SlurmGPUMonitor:
                 if line.strip():
                     parts = line.split()
                     if len(parts) >= 4:
-                        job_id, status, node, partition = parts[:4]
-                        if status == 'R' and partition == self.partition:
+                        job_id, status, node, partition_found = parts[:4]
+                        job_name = ' '.join(parts[4:]) if len(parts) > 4 else 'Unknown'
+                        
+                        # Debug output
+                        print(f"Debug: Processing job {job_id}, status: '{status}', node: '{node}', partition: '{partition_found}'")
+                        
+                        # Check for both 'R' and 'RUNNING' status
+                        if (status in ['R', 'RUNNING']) and partition_found == self.partition:
                             jobs.append({
                                 'job_id': job_id,
                                 'status': status,
                                 'node': node,
-                                'partition': partition
+                                'partition': partition_found,
+                                'job_name': job_name
                             })
+                            print(f"Debug: Added job {job_id} to monitoring list")
+                        else:
+                            print(f"Debug: Skipped job {job_id} - status: '{status}', partition: '{partition_found}' (looking for '{self.partition}')")
+                            
+            print(f"Debug: Total jobs found for monitoring: {len(jobs)}")
             return jobs
+            
         except Exception as e:
             print(f"Error getting running jobs: {e}")
             return []

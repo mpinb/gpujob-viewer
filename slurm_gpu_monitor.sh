@@ -80,6 +80,14 @@ mkdir -p "$OUTPUT_DIR"
 # Set up Python environment (adjust path as needed)
 export PYTHONPATH="${PYTHONPATH}:$(pwd)"
 
+# Test squeue access before starting monitoring
+echo "Testing squeue access for user: $USERNAME, partition: $PARTITION"
+squeue -u "$USERNAME" -o '%A %T %N %P %j' --noheader > /dev/null 2>&1
+if [[ $? -ne 0 ]]; then
+    echo "Error: Cannot access squeue. Please check your SLURM configuration."
+    exit 1
+fi
+
 # Build the python command
 PYTHON_CMD="python3 slurm_gpu_monitor.py --username $USERNAME --partition $PARTITION --interval $INTERVAL --output-dir $OUTPUT_DIR"
 
@@ -110,3 +118,9 @@ if command -v tar &> /dev/null; then
     tar -czf "${OUTPUT_DIR}.tar.gz" "$OUTPUT_DIR"
     echo "Results compressed to: ${OUTPUT_DIR}.tar.gz"
 fi
+
+# Show summary of output files
+if [[ -d "$OUTPUT_DIR" ]]; then
+    echo ""
+    echo "Generated files:"
+    ls -l "$OUTPUT_DIR"

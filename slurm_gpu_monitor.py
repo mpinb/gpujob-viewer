@@ -1,0 +1,493 @@
+#!/usr/bin/env python3
+
+import subprocess
+import json
+import time
+import csv
+import argparse
+import sys
+import os
+from datetime import datetime
+from collections import defaultdict
+import threading
+import queue
+import matplotlib.pyplot as plt
+import pandas as pd
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+class SlurmGPUMonitor:
+    def __init__(self, username, partition="GPU", monitoring_interval=5):
+        self.username = username
+        self.partition = partition
+        self.monitoring_interval = monitoring_interval
+        self.job_data = defaultdict(list)
+        self.stop_monitoring = False
+        
+    def get_running_jobs(self):
+        """Get running GPU jobs for the specified user"""
+        try:
+            cmd = f"squeue -u {self.username} -o '%A %T %N %P' --noheader"
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                print(f"Error getting job info: {result.stderr}")
+                return []
+                
+            jobs = []
+            for line in result.stdout.strip().split('\n'):
+                if line.strip():
+                    parts = line.split()
+                    if len(parts) >= 4:
+                        job_id, status, node, partition = parts[:4]
+                        if status == 'R' and partition == self.partition:
+                            jobs.append({
+                                'job_id': job_id,
+                                'status': status,
+                                'node': node,
+                                'partition': partition
+                            })
+            return jobs
+        except Exception as e:
+            print(f"Error getting running jobs: {e}")
+            return []
+    
+    def get_job_processes(self, node, job_id):
+        """Get processes running on a node for a specific job"""
+        try:
+            # Get processes for the job
+            cmd = f"ssh {node} 'ps -eo pid,ppid,cmd --no-headers | grep -v grep'"
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                return []
+                
+            # Also get SLURM job info to identify job processes
+            slurm_cmd = f"ssh {node} 'scontrol show job {job_id}'"
+            slurm_result = subprocess.run(slurm_cmd, shell=True, capture_output=True, text=True)
+            
+            return result.stdout.strip().split('\n')
+        except Exception as e:
+            print(f"Error getting job processes for {node}: {e}")
+            return []
+    
+    def get_gpu_processes(self, node):
+        """Get GPU processes and their GPU assignments"""
+        try:
+            cmd = f"ssh {node} 'nvidia-smi --query-compute-apps=pid,gpu_uuid,used_memory --format=csv,noheader,nounits'"
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                return {}
+                
+            gpu_processes = {}
+            for line in result.stdout.strip().split('\n'):
+                if line.strip():
+                    parts = line.split(', ')
+                    if len(parts) >= 3:
+                        pid, gpu_uuid, used_mem = parts[:3]
+                        gpu_processes[pid.strip()] = {
+                            'gpu_uuid': gpu_uuid.strip(),
+                            'used_memory': used_mem.strip()
+                        }
+            return gpu_processes
+        except Exception as e:
+            print(f"Error getting GPU processes for {node}: {e}")
+            return {}
+    
+    def get_gpu_info(self, node):
+        """Get GPU information and mapping"""
+        try:
+            cmd = f"ssh {node} 'nvidia-smi --query-gpu=index,uuid,name --format=csv,noheader'"
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                return {}
+                
+            gpu_info = {}
+            for line in result.stdout.strip().split('\n'):
+                if line.strip():
+                    parts = line.split(', ')
+                    if len(parts) >= 3:
+                        index, uuid, name = parts[:3]
+                        gpu_info[uuid.strip()] = {
+                            'index': index.strip(),
+                            'name': name.strip()
+                        }
+            return gpu_info
+        except Exception as e:
+            print(f"Error getting GPU info for {node}: {e}")
+            return {}
+    
+    def get_gpu_utilization(self, node, gpu_index=None):
+        """Get GPU utilization for specific GPU or all GPUs"""
+        try:
+            if gpu_index is not None:
+                cmd = f"ssh {node} 'nvidia-smi --id={gpu_index} --query-gpu=timestamp,name,utilization.gpu,utilization.memory,memory.total,memory.used --format=csv,noheader'"
+            else:
+                cmd = f"ssh {node} 'nvidia-smi --query-gpu=timestamp,name,utilization.gpu,utilization.memory,memory.total,memory.used --format=csv,noheader'"
+            
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                return []
+                
+            utilization_data = []
+            for line in result.stdout.strip().split('\n'):
+                if line.strip():
+                    parts = line.split(', ')
+                    if len(parts) >= 6:
+                        timestamp, name, gpu_util, mem_util, mem_total, mem_used = parts[:6]
+                        utilization_data.append({
+                            'timestamp': timestamp.strip(),
+                            'name': name.strip(),
+                            'gpu_utilization': gpu_util.strip().replace(' %', ''),
+                            'memory_utilization': mem_util.strip().replace(' %', ''),
+                            'memory_total': mem_total.strip().replace(' MiB', ''),
+                            'memory_used': mem_used.strip().replace(' MiB', '')
+                        })
+            return utilization_data
+        except Exception as e:
+            print(f"Error getting GPU utilization for {node}: {e}")
+            return []
+    
+    def identify_job_gpu(self, node, job_id):
+        """Identify which GPU is being used by a specific job"""
+        try:
+            # Get job processes
+            job_processes = self.get_job_processes(node, job_id)
+            
+            # Get GPU processes
+            gpu_processes = self.get_gpu_processes(node)
+            
+            # Get GPU info
+            gpu_info = self.get_gpu_info(node)
+            
+            # Find intersection - processes that are both job processes and GPU processes
+            job_gpu_mapping = {}
+            
+            for process_line in job_processes:
+                if process_line.strip():
+                    pid = process_line.split()[0]
+                    if pid in gpu_processes:
+                        gpu_uuid = gpu_processes[pid]['gpu_uuid']
+                        if gpu_uuid in gpu_info:
+                            gpu_index = gpu_info[gpu_uuid]['index']
+                            job_gpu_mapping[job_id] = {
+                                'gpu_index': gpu_index,
+                                'gpu_uuid': gpu_uuid,
+                                'gpu_name': gpu_info[gpu_uuid]['name'],
+                                'pid': pid,
+                                'used_memory': gpu_processes[pid]['used_memory']
+                            }
+                            break
+            
+            return job_gpu_mapping
+        except Exception as e:
+            print(f"Error identifying job GPU for {node}, job {job_id}: {e}")
+            return {}
+    
+    def monitor_job(self, job_info, results_queue):
+        """Monitor a single job's GPU utilization"""
+        job_id = job_info['job_id']
+        node = job_info['node']
+        
+        print(f"Starting monitoring for job {job_id} on node {node}")
+        
+        # Identify which GPU this job is using
+        job_gpu_mapping = self.identify_job_gpu(node, job_id)
+        
+        if not job_gpu_mapping:
+            print(f"Could not identify GPU for job {job_id} on node {node}")
+            # Monitor all GPUs as fallback
+            gpu_index = None
+        else:
+            gpu_index = job_gpu_mapping[job_id]['gpu_index']
+            print(f"Job {job_id} is using GPU {gpu_index} on node {node}")
+        
+        job_data = []
+        start_time = time.time()
+        
+        while not self.stop_monitoring:
+            try:
+                # Get GPU utilization
+                utilization_data = self.get_gpu_utilization(node, gpu_index)
+                
+                for gpu_data in utilization_data:
+                    data_point = {
+                        'job_id': job_id,
+                        'node': node,
+                        'gpu_index': gpu_index,
+                        'timestamp': datetime.now().isoformat(),
+                        'monitoring_time': time.time() - start_time,
+                        **gpu_data
+                    }
+                    job_data.append(data_point)
+                
+                time.sleep(self.monitoring_interval)
+                
+            except Exception as e:
+                print(f"Error monitoring job {job_id}: {e}")
+                time.sleep(self.monitoring_interval)
+        
+        results_queue.put({job_id: job_data})
+        print(f"Finished monitoring job {job_id}")
+    
+    def monitor_all_jobs(self, duration=None):
+        """Monitor all running jobs"""
+        jobs = self.get_running_jobs()
+        
+        if not jobs:
+            print(f"No running GPU jobs found for user {self.username}")
+            return
+        
+        print(f"Found {len(jobs)} running GPU jobs for user {self.username}")
+        
+        results_queue = queue.Queue()
+        
+        # Start monitoring threads
+        with ThreadPoolExecutor(max_workers=len(jobs)) as executor:
+            futures = []
+            
+            for job in jobs:
+                future = executor.submit(self.monitor_job, job, results_queue)
+                futures.append(future)
+            
+            # Monitor for specified duration or until interrupted
+            start_time = time.time()
+            
+            try:
+                if duration:
+                    time.sleep(duration)
+                else:
+                    print("Monitoring jobs... Press Ctrl+C to stop")
+                    while True:
+                        time.sleep(1)
+                        # Check if any jobs are still running
+                        current_jobs = self.get_running_jobs()
+                        if not current_jobs:
+                            print("All jobs completed")
+                            break
+                        
+            except KeyboardInterrupt:
+                print("\nStopping monitoring...")
+            
+            # Stop monitoring
+            self.stop_monitoring = True
+            
+            # Wait for all threads to complete
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    print(f"Error in monitoring thread: {e}")
+        
+        # Collect results
+        all_job_data = {}
+        while not results_queue.empty():
+            job_data = results_queue.get()
+            all_job_data.update(job_data)
+        
+        return all_job_data
+    
+    def save_data(self, job_data, filename):
+        """Save monitoring data to CSV"""
+        if not job_data:
+            print("No data to save")
+            return
+        
+        # Flatten data for CSV
+        all_data = []
+        for job_id, data_points in job_data.items():
+            all_data.extend(data_points)
+        
+        if all_data:
+            df = pd.DataFrame(all_data)
+            df.to_csv(filename, index=False)
+            print(f"Data saved to {filename}")
+    
+    def generate_report(self, job_data, output_dir="gpu_monitoring_report"):
+        """Generate analysis report and plots"""
+        if not job_data:
+            print("No data to analyze")
+            return
+        
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Convert to DataFrame
+        all_data = []
+        for job_id, data_points in job_data.items():
+            all_data.extend(data_points)
+        
+        if not all_data:
+            print("No data points to analyze")
+            return
+            
+        df = pd.DataFrame(all_data)
+        
+        # Convert numeric columns
+        numeric_columns = ['gpu_utilization', 'memory_utilization', 'memory_total', 'memory_used', 'monitoring_time']
+        for col in numeric_columns:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        # Generate summary statistics
+        summary_stats = {}
+        for job_id in df['job_id'].unique():
+            job_df = df[df['job_id'] == job_id]
+            stats = {
+                'job_id': job_id,
+                'node': job_df['node'].iloc[0] if not job_df.empty else 'Unknown',
+                'gpu_index': job_df['gpu_index'].iloc[0] if not job_df.empty else 'Unknown',
+                'duration_minutes': job_df['monitoring_time'].max() / 60 if 'monitoring_time' in job_df.columns else 0,
+                'avg_gpu_utilization': job_df['gpu_utilization'].mean() if 'gpu_utilization' in job_df.columns else 0,
+                'max_gpu_utilization': job_df['gpu_utilization'].max() if 'gpu_utilization' in job_df.columns else 0,
+                'avg_memory_utilization': job_df['memory_utilization'].mean() if 'memory_utilization' in job_df.columns else 0,
+                'max_memory_utilization': job_df['memory_utilization'].max() if 'memory_utilization' in job_df.columns else 0,
+                'avg_memory_used_gb': job_df['memory_used'].mean() / 1024 if 'memory_used' in job_df.columns else 0,
+                'max_memory_used_gb': job_df['memory_used'].max() / 1024 if 'memory_used' in job_df.columns else 0,
+            }
+            summary_stats[job_id] = stats
+        
+        # Save summary statistics
+        summary_df = pd.DataFrame(summary_stats.values())
+        summary_df.to_csv(f"{output_dir}/job_summary.csv", index=False)
+        
+        # Generate plots
+        self.create_plots(df, output_dir)
+        
+        # Generate text report
+        with open(f"{output_dir}/report.txt", 'w') as f:
+            f.write(f"GPU Monitoring Report for user: {self.username}\n")
+            f.write(f"Generated on: {datetime.now().isoformat()}\n\n")
+            f.write(f"Total jobs monitored: {len(summary_stats)}\n\n")
+            
+            for job_id, stats in summary_stats.items():
+                f.write(f"Job ID: {job_id}\n")
+                f.write(f"  Node: {stats['node']}\n")
+                f.write(f"  GPU Index: {stats['gpu_index']}\n")
+                f.write(f"  Duration: {stats['duration_minutes']:.2f} minutes\n")
+                f.write(f"  Average GPU Utilization: {stats['avg_gpu_utilization']:.2f}%\n")
+                f.write(f"  Maximum GPU Utilization: {stats['max_gpu_utilization']:.2f}%\n")
+                f.write(f"  Average Memory Utilization: {stats['avg_memory_utilization']:.2f}%\n")
+                f.write(f"  Maximum Memory Utilization: {stats['max_memory_utilization']:.2f}%\n")
+                f.write(f"  Average Memory Used: {stats['avg_memory_used_gb']:.2f} GB\n")
+                f.write(f"  Maximum Memory Used: {stats['max_memory_used_gb']:.2f} GB\n\n")
+        
+        print(f"Report generated in {output_dir}/")
+    
+    def create_plots(self, df, output_dir):
+        """Create visualization plots"""
+        # GPU Utilization over time for each job
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        fig.suptitle(f'GPU Monitoring Results for {self.username}', fontsize=16)
+        
+        # Plot 1: GPU Utilization over time
+        ax1 = axes[0, 0]
+        for job_id in df['job_id'].unique():
+            job_df = df[df['job_id'] == job_id]
+            if 'monitoring_time' in job_df.columns and 'gpu_utilization' in job_df.columns:
+                ax1.plot(job_df['monitoring_time'] / 60, job_df['gpu_utilization'], 
+                        label=f'Job {job_id}', alpha=0.7)
+        ax1.set_xlabel('Time (minutes)')
+        ax1.set_ylabel('GPU Utilization (%)')
+        ax1.set_title('GPU Utilization Over Time')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        # Plot 2: Memory Utilization over time
+        ax2 = axes[0, 1]
+        for job_id in df['job_id'].unique():
+            job_df = df[df['job_id'] == job_id]
+            if 'monitoring_time' in job_df.columns and 'memory_utilization' in job_df.columns:
+                ax2.plot(job_df['monitoring_time'] / 60, job_df['memory_utilization'], 
+                        label=f'Job {job_id}', alpha=0.7)
+        ax2.set_xlabel('Time (minutes)')
+        ax2.set_ylabel('Memory Utilization (%)')
+        ax2.set_title('Memory Utilization Over Time')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        
+        # Plot 3: Average GPU Utilization by job
+        ax3 = axes[1, 0]
+        job_avg_gpu = df.groupby('job_id')['gpu_utilization'].mean()
+        ax3.bar(range(len(job_avg_gpu)), job_avg_gpu.values)
+        ax3.set_xlabel('Job ID')
+        ax3.set_ylabel('Average GPU Utilization (%)')
+        ax3.set_title('Average GPU Utilization by Job')
+        ax3.set_xticks(range(len(job_avg_gpu)))
+        ax3.set_xticklabels(job_avg_gpu.index, rotation=45)
+        
+        # Plot 4: Average Memory Usage by job
+        ax4 = axes[1, 1]
+        job_avg_mem = df.groupby('job_id')['memory_used'].mean() / 1024  # Convert to GB
+        ax4.bar(range(len(job_avg_mem)), job_avg_mem.values)
+        ax4.set_xlabel('Job ID')
+        ax4.set_ylabel('Average Memory Usage (GB)')
+        ax4.set_title('Average Memory Usage by Job')
+        ax4.set_xticks(range(len(job_avg_mem)))
+        ax4.set_xticklabels(job_avg_mem.index, rotation=45)
+        
+        plt.tight_layout()
+        plt.savefig(f"{output_dir}/gpu_monitoring_plots.png", dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        # Create individual job plots
+        for job_id in df['job_id'].unique():
+            job_df = df[df['job_id'] == job_id]
+            if len(job_df) > 1:
+                fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
+                fig.suptitle(f'Job {job_id} GPU Monitoring', fontsize=14)
+                
+                # GPU Utilization
+                if 'monitoring_time' in job_df.columns and 'gpu_utilization' in job_df.columns:
+                    ax1.plot(job_df['monitoring_time'] / 60, job_df['gpu_utilization'], 'b-', alpha=0.7)
+                    ax1.set_ylabel('GPU Utilization (%)')
+                    ax1.set_title('GPU Utilization')
+                    ax1.grid(True, alpha=0.3)
+                
+                # Memory Usage
+                if 'monitoring_time' in job_df.columns and 'memory_used' in job_df.columns:
+                    ax2.plot(job_df['monitoring_time'] / 60, job_df['memory_used'] / 1024, 'r-', alpha=0.7)
+                    ax2.set_xlabel('Time (minutes)')
+                    ax2.set_ylabel('Memory Usage (GB)')
+                    ax2.set_title('Memory Usage')
+                    ax2.grid(True, alpha=0.3)
+                
+                plt.tight_layout()
+                plt.savefig(f"{output_dir}/job_{job_id}_monitoring.png", dpi=300, bbox_inches='tight')
+                plt.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Monitor SLURM GPU jobs')
+    parser.add_argument('--username', '-u', required=True, help='Username to monitor')
+    parser.add_argument('--partition', '-p', default='GPU', help='Partition to monitor (default: GPU)')
+    parser.add_argument('--interval', '-i', type=int, default=5, help='Monitoring interval in seconds (default: 5)')
+    parser.add_argument('--duration', '-d', type=int, help='Monitoring duration in seconds (optional)')
+    parser.add_argument('--output-dir', '-o', default='gpu_monitoring_output', help='Output directory for results')
+    parser.add_argument('--csv-file', '-c', help='CSV file to save raw data')
+    
+    args = parser.parse_args()
+    
+    # Create monitor instance
+    monitor = SlurmGPUMonitor(args.username, args.partition, args.interval)
+    
+    # Monitor jobs
+    print(f"Starting GPU monitoring for user: {args.username}")
+    job_data = monitor.monitor_all_jobs(args.duration)
+    
+    # Save results
+    if job_data:
+        # Save CSV if requested
+        if args.csv_file:
+            monitor.save_data(job_data, args.csv_file)
+        
+        # Generate report
+        monitor.generate_report(job_data, args.output_dir)
+        print(f"Monitoring complete. Results saved to {args.output_dir}/")
+    else:
+        print("No data collected")
+
+
+if __name__ == "__main__":
+    main()

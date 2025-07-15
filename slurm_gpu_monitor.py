@@ -11,9 +11,37 @@ from datetime import datetime
 from collections import defaultdict
 import threading
 import queue
-import matplotlib.pyplot as plt
+#import matplotlib.pyplot as plt
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Import plotting libraries with fallback
+PLOTTING_BACKEND = None
+try:
+    import matplotlib
+    matplotlib.use('Agg')  # Use non-interactive backend
+    import matplotlib.pyplot as plt
+    PLOTTING_BACKEND = 'matplotlib'
+    print("Using matplotlib backend")
+except ImportError:
+    print("matplotlib not available")
+
+try:
+    from bokeh.plotting import figure, save, output_file
+    from bokeh.layouts import column, row
+    from bokeh.models import HoverTool, ColumnDataSource
+    from bokeh.palettes import Category10
+    from bokeh.io import curdoc
+    if PLOTTING_BACKEND is None:
+        PLOTTING_BACKEND = 'bokeh'
+        print("Using bokeh backend")
+    else:
+        print("bokeh also available as alternative backend")
+except ImportError:
+    if PLOTTING_BACKEND is None:
+        print("Warning: Neither matplotlib nor bokeh available. Plots will be disabled.")
+
+
 
 class SlurmGPUMonitor:
     def __init__(self, username, partition="GPU", monitoring_interval=5):
@@ -387,9 +415,18 @@ class SlurmGPUMonitor:
                 f.write(f"  Maximum Memory Used: {stats['max_memory_used_gb']:.2f} GB\n\n")
         
         print(f"Report generated in {output_dir}/")
-    
+
     def create_plots(self, df, output_dir):
-        """Create visualization plots"""
+        """Create visualization plots using selected backend"""
+        if self.plotting_backend == 'matplotlib':
+            self.create_matplotlib_plots(df, output_dir)
+        elif self.plotting_backend == 'bokeh':
+            self.create_bokeh_plots(df, output_dir)
+        else:
+            print("No plotting backend available")
+    
+    def create_matplotlib_plots(self, df, output_dir):
+        """Create visualization plots using matplotlib"""
         # GPU Utilization over time for each job
         fig, axes = plt.subplots(2, 2, figsize=(15, 10))
         fig.suptitle(f'GPU Monitoring Results for {self.username}', fontsize=16)
@@ -469,6 +506,134 @@ class SlurmGPUMonitor:
                 plt.tight_layout()
                 plt.savefig(f"{output_dir}/job_{job_id}_monitoring.png", dpi=300, bbox_inches='tight')
                 plt.close()
+    
+    def create_bokeh_plots(self, df, output_dir):
+        """Create visualization plots using bokeh"""
+        # Set up color palette
+        colors = Category10[max(3, min(10, len(df['job_id'].unique())))]
+        
+        # Create main dashboard
+        output_file(f"{output_dir}/gpu_monitoring_dashboard.html")
+        
+        # Plot 1: GPU Utilization over time
+        p1 = figure(title="GPU Utilization Over Time", 
+                   x_axis_label="Time (minutes)", 
+                   y_axis_label="GPU Utilization (%)",
+                   width=600, height=400)
+        
+        for i, job_id in enumerate(df['job_id'].unique()):
+            job_df = df[df['job_id'] == job_id]
+            if 'monitoring_time' in job_df.columns and 'gpu_utilization' in job_df.columns:
+                source = ColumnDataSource(data=dict(
+                    x=job_df['monitoring_time'] / 60,
+                    y=job_df['gpu_utilization'],
+                    job_id=[job_id] * len(job_df)
+                ))
+                p1.line('x', 'y', source=source, legend_label=f'Job {job_id}', 
+                       line_width=2, color=colors[i % len(colors)])
+        
+        p1.add_tools(HoverTool(tooltips=[("Job ID", "@job_id"), ("Time", "@x min"), ("GPU Util", "@y%")]))
+        p1.legend.location = "top_left"
+        
+        # Plot 2: Memory Utilization over time
+        p2 = figure(title="Memory Utilization Over Time", 
+                   x_axis_label="Time (minutes)", 
+                   y_axis_label="Memory Utilization (%)",
+                   width=600, height=400)
+        
+        for i, job_id in enumerate(df['job_id'].unique()):
+            job_df = df[df['job_id'] == job_id]
+            if 'monitoring_time' in job_df.columns and 'memory_utilization' in job_df.columns:
+                source = ColumnDataSource(data=dict(
+                    x=job_df['monitoring_time'] / 60,
+                    y=job_df['memory_utilization'],
+                    job_id=[job_id] * len(job_df)
+                ))
+                p2.line('x', 'y', source=source, legend_label=f'Job {job_id}', 
+                       line_width=2, color=colors[i % len(colors)])
+        
+        p2.add_tools(HoverTool(tooltips=[("Job ID", "@job_id"), ("Time", "@x min"), ("Memory Util", "@y%")]))
+        p2.legend.location = "top_left"
+        
+        # Plot 3: Average GPU Utilization by job
+        job_avg_gpu = df.groupby('job_id')['gpu_utilization'].mean()
+        p3 = figure(title="Average GPU Utilization by Job", 
+                   x_axis_label="Job ID", 
+                   y_axis_label="Average GPU Utilization (%)",
+                   x_range=job_avg_gpu.index.astype(str),
+                   width=600, height=400)
+        
+        source = ColumnDataSource(data=dict(
+            x=job_avg_gpu.index.astype(str),
+            y=job_avg_gpu.values,
+            job_id=job_avg_gpu.index.astype(str)
+        ))
+        p3.vbar(x='x', top='y', source=source, width=0.8, color="navy", alpha=0.7)
+        p3.add_tools(HoverTool(tooltips=[("Job ID", "@job_id"), ("Avg GPU Util", "@y%")]))
+        
+        # Plot 4: Average Memory Usage by job
+        job_avg_mem = df.groupby('job_id')['memory_used'].mean() / 1024  # Convert to GB
+        p4 = figure(title="Average Memory Usage by Job", 
+                   x_axis_label="Job ID", 
+                   y_axis_label="Average Memory Usage (GB)",
+                   x_range=job_avg_mem.index.astype(str),
+                   width=600, height=400)
+        
+        source = ColumnDataSource(data=dict(
+            x=job_avg_mem.index.astype(str),
+            y=job_avg_mem.values,
+            job_id=job_avg_mem.index.astype(str)
+        ))
+        p4.vbar(x='x', top='y', source=source, width=0.8, color="red", alpha=0.7)
+        p4.add_tools(HoverTool(tooltips=[("Job ID", "@job_id"), ("Avg Memory", "@y GB")]))
+        
+        # Create layout
+        layout = column(row(p1, p2), row(p3, p4))
+        save(layout)
+        
+        # Create individual job plots
+        for job_id in df['job_id'].unique():
+            job_df = df[df['job_id'] == job_id]
+            if len(job_df) > 1:
+                output_file(f"{output_dir}/job_{job_id}_monitoring.html")
+                
+                # GPU Utilization
+                p1 = figure(title=f"Job {job_id} GPU Utilization", 
+                           x_axis_label="Time (minutes)", 
+                           y_axis_label="GPU Utilization (%)",
+                           width=800, height=300)
+                
+                if 'monitoring_time' in job_df.columns and 'gpu_utilization' in job_df.columns:
+                    source = ColumnDataSource(data=dict(
+                        x=job_df['monitoring_time'] / 60,
+                        y=job_df['gpu_utilization'],
+                        timestamp=job_df['timestamp']
+                    ))
+                    p1.line('x', 'y', source=source, line_width=2, color="blue")
+                    p1.add_tools(HoverTool(tooltips=[("Time", "@timestamp"), ("GPU Util", "@y%")]))
+                
+                # Memory Usage
+                p2 = figure(title=f"Job {job_id} Memory Usage", 
+                           x_axis_label="Time (minutes)", 
+                           y_axis_label="Memory Usage (GB)",
+                           width=800, height=300)
+                
+                if 'monitoring_time' in job_df.columns and 'memory_used' in job_df.columns:
+                    source = ColumnDataSource(data=dict(
+                        x=job_df['monitoring_time'] / 60,
+                        y=job_df['memory_used'] / 1024,
+                        timestamp=job_df['timestamp']
+                    ))
+                    p2.line('x', 'y', source=source, line_width=2, color="red")
+                    p2.add_tools(HoverTool(tooltips=[("Time", "@timestamp"), ("Memory", "@y GB")]))
+                
+                # Save individual job layout
+                layout = column(p1, p2)
+                save(layout)
+        
+        print(f"Bokeh plots saved to {output_dir}/")
+
+
 
 
 def main():
@@ -479,6 +644,9 @@ def main():
     parser.add_argument('--duration', '-d', type=int, help='Monitoring duration in seconds (optional)')
     parser.add_argument('--output-dir', '-o', default='gpu_monitoring_output', help='Output directory for results')
     parser.add_argument('--csv-file', '-c', help='CSV file to save raw data')
+    parser.add_argument('--backend', '-b', choices=['matplotlib', 'bokeh'], default='matplotlib',
+                        help='Plotting backend to use (default: matplotlib)')
+    parser.add_argument('--bokeh_port', '-bp', type=int, default=5006, help='Port for Bokeh server (default: 5006)')
     
     args = parser.parse_args()
     
@@ -487,6 +655,22 @@ def main():
     
     # Monitor jobs
     print(f"Starting GPU monitoring for user: {args.username}")
+    if args.backend == 'bokeh':
+        monitor.plotting_backend = 'bokeh'
+    else:
+        monitor.plotting_backend = 'matplotlib'
+        
+    if args.backend == 'bokeh':
+        # Set up Bokeh server
+        output_file(f"{args.output_dir}/gpu_monitoring_dashboard.html")
+        print(f"Bokeh server will run on port {args.bokeh_port}. Access the dashboard at http://localhost:{args.bokeh_port}/gpu_monitoring_dashboard.html")
+        # Start Bokeh server in a separate thread
+        threading.Thread(target=lambda: subprocess.run(['bokeh', 'serve', '--port', str(args.bokeh_port), '--allow-websocket-origin=localhost:5006', args.output_dir])).start()
+    else:
+        print(f"Using {args.backend} for plotting. Results will be saved in {args.output_dir}/")
+    # Create output directory if it doesn't exist
+    os.makedirs(args.output_dir, exist_ok=True)
+    
     job_data = monitor.monitor_all_jobs(args.duration)
     
     # Save results

@@ -746,7 +746,7 @@ class SlurmGPUMonitor:
         app = Application(FunctionHandler(self.create_bokeh_app))
         
         # Start server
-        server = Server({'/': app}, port=port, allow_websocket_origin=[f"localhost:{port}", output_dir=output_dir])
+        server = Server({'/': app}, port=port, allow_websocket_origin=[f"localhost:{port}"], output_dir=output_dir)
         server.start()
         
         print(f"Bokeh server started on http://localhost:{port}")

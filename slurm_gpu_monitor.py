@@ -775,8 +775,8 @@ def main():
     parser.add_argument('--duration', '-d', type=int, help='Monitoring duration in seconds (optional)')
     parser.add_argument('--output-dir', '-o', default='gpu_monitoring_output', help='Output directory for results')
     parser.add_argument('--csv-file', '-c', help='CSV file to save raw data')
-    parser.add_argument('--backend', '-b', choices=['matplotlib', 'bokeh'], default='matplotlib',
-                        help='Plotting backend to use (default: matplotlib)')
+    parser.add_argument('--backend', '-b', choices=['matplotlib', 'bokeh'], default='bokeh',
+                        help='Plotting backend to use (default: bokeh)')
     parser.add_argument('--bokeh_port', '-bp', type=int, default=5006, help='Port for Bokeh server (default: 5006)')
     
     args = parser.parse_args()

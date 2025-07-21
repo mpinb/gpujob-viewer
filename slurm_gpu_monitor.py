@@ -1,48 +1,45 @@
 #!/usr/bin/env python3
 
 import subprocess
-import json
 import time
-import csv
 import argparse
-import sys
 import os
 from datetime import datetime
 from collections import defaultdict
-import threading
 import queue
-#import matplotlib.pyplot as plt
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
-# Import plotting libraries with fallback
-PLOTTING_BACKEND = None
+# Importing plotting libraries for real-time visualization
+# Using matplotlib for static plots and bokeh for interactive plots
+
+# Importing bokeh and set flag if it is available
+try:
+    from bokeh.plotting import figure
+    from bokeh.layouts import column, row
+    from bokeh.models import HoverTool, ColumnDataSource, Div
+    from bokeh.palettes import Category10
+    from bokeh.server.server import Server
+    from bokeh.application import Application
+    from bokeh.application.handlers import FunctionHandler
+    from bokeh.io import output_file, save
+    BOKEH_AVAILABLE = True
+except ImportError:
+    print("Bokeh is not available for live GPU monitoring.")
+    BOKEH_AVAILABLE = False
+
+# Importing matplotlib and set flag if it is available
 try:
     import matplotlib
     matplotlib.use('Agg')  # Use non-interactive backend
     import matplotlib.pyplot as plt
-    PLOTTING_BACKEND = 'matplotlib'
-    print("Using matplotlib backend")
+    MATPLOTLIB_AVAILABLE = True
 except ImportError:
-    print("matplotlib not available")
+    print("Matplotlib is not available for plotting.")
+    MATPLOTLIB_AVAILABLE = False
 
-try:
-    from bokeh.plotting import figure, save, output_file
-    from bokeh.layouts import column, row
-    from bokeh.models import HoverTool, ColumnDataSource
-    from bokeh.palettes import Category10
-    from bokeh.io import curdoc
-    if PLOTTING_BACKEND is None:
-        PLOTTING_BACKEND = 'bokeh'
-        print("Using bokeh backend")
-    else:
-        print("bokeh also available as alternative backend")
-except ImportError:
-    if PLOTTING_BACKEND is None:
-        print("Warning: Neither matplotlib nor bokeh available. Plots will be disabled.")
-
-
-
+# Define the main class for monitoring SLURM GPU jobs
 class SlurmGPUMonitor:
     def __init__(self, username, partition="GPU", monitoring_interval=5):
         self.username = username
@@ -50,6 +47,10 @@ class SlurmGPUMonitor:
         self.monitoring_interval = monitoring_interval
         self.job_data = defaultdict(list)
         self.stop_monitoring = False
+        self.live_data = defaultdict(list)  # For real-time Bokeh updates
+        self.bokeh_sources = {}  # Store ColumnDataSource objects
+        self.plotting_backend = 'bokeh'  # Default plotting backend
+        self.data_lock = threading.Lock()  # Lock for thread-safe data access
         
     def get_running_jobs(self):
         """Get running GPU jobs for the specified user"""
@@ -227,8 +228,42 @@ class SlurmGPUMonitor:
             print(f"Error identifying job GPU for {node}, job {job_id}: {e}")
             return {}
     
+    
+    def update_live_data(self, job_id, data_point):
+        """Update live data for real-time Bokeh plotting"""
+        if self.plotting_backend == 'bokeh':
+            with self.data_lock:
+                self.live_data[job_id].append(data_point)
+                
+                # Update Bokeh data sources if they exist
+                if job_id in self.bokeh_sources:
+                    try:
+                        job_data = self.live_data[job_id]
+                        df = pd.DataFrame(job_data)
+                        
+                        # Update GPU utilization source
+                        if 'gpu_util_source' in self.bokeh_sources[job_id] and not df.empty:
+                            new_data = {
+                                'x': df['monitoring_time'].tolist(),
+                                'y': pd.to_numeric(df['gpu_utilization'], errors='coerce').fillna(0).tolist(),
+                                'job_id': [job_id] * len(df)
+                            }
+                            self.bokeh_sources[job_id]['gpu_util_source'].data = new_data
+                        
+                        # Update memory utilization source
+                        if 'mem_util_source' in self.bokeh_sources[job_id] and not df.empty:
+                            new_data = {
+                                'x': df['monitoring_time'].tolist(),
+                                'y': pd.to_numeric(df['memory_utilization'], errors='coerce').fillna(0).tolist(),
+                                'job_id': [job_id] * len(df)
+                            }
+                            self.bokeh_sources[job_id]['mem_util_source'].data = new_data
+                    except Exception as e:
+                        print(f"Error updating live data for job {job_id}: {e}")
+
+
     def monitor_job(self, job_info, results_queue):
-        """Monitor a single job's GPU utilization"""
+        """Monitor a single job's GPU utilization with real-time updates"""
         job_id = job_info['job_id']
         node = job_info['node']
         
@@ -263,6 +298,9 @@ class SlurmGPUMonitor:
                         **gpu_data
                     }
                     job_data.append(data_point)
+                    
+                    # Update live data for real-time Bokeh plotting
+                    self.update_live_data(job_id, data_point)
                 
                 time.sleep(self.monitoring_interval)
                 
@@ -272,9 +310,71 @@ class SlurmGPUMonitor:
         
         results_queue.put({job_id: job_data})
         print(f"Finished monitoring job {job_id}")
+
+
+    def create_bokeh_app(self, doc):
+        """Create Bokeh application for real-time monitoring"""
+        # Title
+        title = Div(text=f"<h1>Real-time GPU Monitoring for {self.username}</h1>")
+        
+        # Get initial job list
+        jobs = self.get_running_jobs()
+        
+        if not jobs:
+            doc.add_root(column(title, Div(text="No running jobs found")))
+            return
+        
+        plots = []
+        
+        for job in jobs:
+            job_id = job['job_id']
+            
+            # Initialize data sources
+            self.bokeh_sources[job_id] = {
+                'gpu_util_source': ColumnDataSource(data={'x': [], 'y': [], 'job_id': []}),
+                'mem_util_source': ColumnDataSource(data={'x': [], 'y': [], 'job_id': []})
+            }
+            
+            # GPU Utilization plot
+            p1 = figure(title=f"Job {job_id} - GPU Utilization", 
+                       x_axis_label="Time (seconds)", 
+                       y_axis_label="GPU Utilization (%)",
+                       width=600, height=300)
+            
+            p1.line('x', 'y', source=self.bokeh_sources[job_id]['gpu_util_source'], 
+                   line_width=2, color="blue")
+            p1.add_tools(HoverTool(tooltips=[("Job ID", "@job_id"), ("Time", "@x s"), ("GPU Util", "@y%")]))
+            
+            # Memory Utilization plot
+            p2 = figure(title=f"Job {job_id} - Memory Utilization", 
+                       x_axis_label="Time (seconds)", 
+                       y_axis_label="Memory Utilization (%)",
+                       width=600, height=300)
+            
+            p2.line('x', 'y', source=self.bokeh_sources[job_id]['mem_util_source'], 
+                   line_width=2, color="red")
+            p2.add_tools(HoverTool(tooltips=[("Job ID", "@job_id"), ("Time", "@x s"), ("Memory Util", "@y%")]))
+            
+            # Add plots to layout
+            plots.append(row(p1, p2))
+        
+        # Create layout
+        layout = column(title, *plots)
+        doc.add_root(layout)
+        
+        # Add periodic callback to refresh job list
+        def update_job_list():
+            current_jobs = self.get_running_jobs()
+            if len(current_jobs) != len(jobs):
+                # Job list changed, need to recreate layout
+                doc.clear()
+                self.create_bokeh_app(doc)
+        
+        doc.add_periodic_callback(update_job_list, 30000)  # Check every 30 seconds
     
+
     def monitor_all_jobs(self, duration=None):
-        """Monitor all running jobs"""
+        """Monitor all running jobs with real-time updates"""
         jobs = self.get_running_jobs()
         
         if not jobs:
@@ -282,7 +382,8 @@ class SlurmGPUMonitor:
             return
         
         print(f"Found {len(jobs)} running GPU jobs for user {self.username}")
-        
+
+        # Initialize results queue for collecting job data
         results_queue = queue.Queue()
         
         # Start monitoring threads
@@ -301,6 +402,7 @@ class SlurmGPUMonitor:
                     time.sleep(duration)
                 else:
                     print("Monitoring jobs... Press Ctrl+C to stop")
+                    # Keep monitoring until interrupted
                     while True:
                         time.sleep(1)
                         # Check if any jobs are still running
@@ -634,6 +736,35 @@ class SlurmGPUMonitor:
         print(f"Bokeh plots saved to {output_dir}/")
 
 
+    def start_bokeh_server(self, port=5006, output_dir="gpu_monitoring_output"):
+        """Start Bokeh server for real-time monitoring"""
+        if not BOKEH_AVAILABLE:
+            print("Bokeh not available. Cannot start real-time server.")
+            return None
+        
+        # Create Bokeh application
+        app = Application(FunctionHandler(self.create_bokeh_app))
+        
+        # Start server
+        server = Server({'/': app}, port=port, allow_websocket_origin=[f"localhost:{port}", output_dir=output_dir])
+        server.start()
+        
+        print(f"Bokeh server started on http://localhost:{port}")
+        print("Real-time monitoring dashboard is now available!")
+        print("Access the dashboard at http://localhost:{port}/gpu_monitoring_dashboard.html")
+        server.io_loop.add_callback(server.show, "/gpu_monitoring_dashboard.html")  # Open the dashboard in a browser
+        server.io_loop.start()
+        # Return server instance for potential stopping later
+        self.bokeh_server = server
+        
+        return server
+    
+    def stop_bokeh_server(self):
+        """Stop the Bokeh server if running"""
+        if hasattr(self, 'bokeh_server') and self.bokeh_server:
+            self.bokeh_server.stop()
+            print("Bokeh server stopped")
+        return None
 
 
 def main():
@@ -663,15 +794,16 @@ def main():
     if args.backend == 'bokeh':
         # Set up Bokeh server
         output_file(f"{args.output_dir}/gpu_monitoring_dashboard.html")
-        print(f"Bokeh server will run on port {args.bokeh_port}. Access the dashboard at http://localhost:{args.bokeh_port}/gpu_monitoring_dashboard.html")
-        # Start Bokeh server in a separate thread
-        threading.Thread(target=lambda: subprocess.run(['bokeh', 'serve', '--port', str(args.bokeh_port), '--allow-websocket-origin=localhost:5006', args.output_dir])).start()
+        monitor.start_bokeh_server(args.bokeh_port, args.output_dir)
     else:
         print(f"Using {args.backend} for plotting. Results will be saved in {args.output_dir}/")
     # Create output directory if it doesn't exist
     os.makedirs(args.output_dir, exist_ok=True)
     
     job_data = monitor.monitor_all_jobs(args.duration)
+    
+    # If Bokeh server is running, stop it
+    monitor.stop_bokeh_server()
     
     # Save results
     if job_data:

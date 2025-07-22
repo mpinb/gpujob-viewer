@@ -14,6 +14,12 @@ import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
+# Adding a logging library for better debugging and error handling
+import logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+
 # Importing plotting libraries for real-time visualization
 # Using matplotlib for static plots and bokeh for interactive plots
 
@@ -61,6 +67,9 @@ class SlurmGPUMonitor:
         # Set up signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
+        
+        # logging setup
+        logging.info(f"Initialized SlurmGPUMonitor for user: {self.username}, partition: {self.partition}, monitoring interval: {self.monitoring_interval} seconds")
     
     
     def _signal_handler(self, signum, frame):
@@ -161,6 +170,10 @@ class SlurmGPUMonitor:
             cmd = f"ssh {ssh_opts} {node} 'nvidia-smi --query-compute-apps=pid,gpu_uuid,used_memory --format=csv,noheader,nounits'"
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
             
+            
+            logging.info(f"Running command to get GPU processes on {node}: {cmd}")
+            logging.info(f"Command output: {result.stdout.strip()}")
+            
             if result.returncode != 0:
                 return {}
                 
@@ -188,6 +201,10 @@ class SlurmGPUMonitor:
 
             cmd = f"ssh {ssh_opts} {node} 'nvidia-smi --query-gpu=index,uuid,name --format=csv,noheader'"
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            
+            
+            logging.info(f"Running command to get GPU info on {node}: {cmd}")
+            logging.info(f"Command output: {result.stdout.strip()}")
             
             if result.returncode != 0:
                 return {}
@@ -220,6 +237,10 @@ class SlurmGPUMonitor:
                 cmd = f"ssh {ssh_opts} {node} 'nvidia-smi --query-gpu=timestamp,name,utilization.gpu,utilization.memory,memory.total,memory.used --format=csv,noheader'"
             
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            
+            logging.info(f"Running command to get GPU utilization on {node}: {cmd}")
+            logging.info(f"Command output: {result.stdout.strip()}")
+            
             
             if result.returncode != 0:
                 return []

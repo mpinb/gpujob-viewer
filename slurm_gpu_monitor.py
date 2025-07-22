@@ -1,9 +1,12 @@
+
 #!/usr/bin/env python3
 
 import subprocess
 import time
 import argparse
 import os
+import signal
+import sys
 from datetime import datetime
 from collections import defaultdict
 import queue
@@ -51,6 +54,36 @@ class SlurmGPUMonitor:
         self.bokeh_sources = {}  # Store ColumnDataSource objects
         self.plotting_backend = 'bokeh'  # Default plotting backend
         self.data_lock = threading.Lock()  # Lock for thread-safe data access
+        self.shutdown_event = threading.Event()  # Event for coordinated shutdown
+        self.bokeh_server = None
+        self.executor = None
+        
+        # Set up signal handlers for graceful shutdown
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
+        
+    def _signal_handler(self, signum, frame):
+        """Handle shutdown signals gracefully"""
+        print(f"\nReceived signal {signum}. Initiating graceful shutdown...")
+        self.stop_monitoring = True
+        self.shutdown_event.set()
+        
+        # Stop Bokeh server if running
+        if self.bokeh_server:
+            print("Stopping Bokeh server...")
+            try:
+                self.bokeh_server.stop()
+            except Exception as e:
+                print(f"Error stopping Bokeh server: {e}")
+        
+        # If we're in the middle of monitoring, let it clean up
+        if hasattr(self, '_monitoring_in_progress') and self._monitoring_in_progress:
+            print("Waiting for monitoring threads to complete...")
+            return
+        
+        # Otherwise exit immediately
+        print("Shutdown complete.")
+        sys.exit(0)
         
     def get_running_jobs(self):
         """Get running GPU jobs for the specified user"""
@@ -283,7 +316,7 @@ class SlurmGPUMonitor:
         job_data = []
         start_time = time.time()
         
-        while not self.stop_monitoring:
+        while not self.stop_monitoring and not self.shutdown_event.is_set():
             try:
                 # Get GPU utilization
                 utilization_data = self.get_gpu_utilization(node, gpu_index)
@@ -302,11 +335,14 @@ class SlurmGPUMonitor:
                     # Update live data for real-time Bokeh plotting
                     self.update_live_data(job_id, data_point)
                 
-                time.sleep(self.monitoring_interval)
+                # Check for shutdown with timeout
+                if self.shutdown_event.wait(timeout=self.monitoring_interval):
+                    break
                 
             except Exception as e:
                 print(f"Error monitoring job {job_id}: {e}")
-                time.sleep(self.monitoring_interval)
+                if self.shutdown_event.wait(timeout=self.monitoring_interval):
+                    break
         
         results_queue.put({job_id: job_data})
         print(f"Finished monitoring job {job_id}")
@@ -364,73 +400,94 @@ class SlurmGPUMonitor:
         
         # Add periodic callback to refresh job list
         def update_job_list():
-            current_jobs = self.get_running_jobs()
-            if len(current_jobs) != len(jobs):
-                # Job list changed, need to recreate layout
-                doc.clear()
-                self.create_bokeh_app(doc)
+            if not self.shutdown_event.is_set():
+                current_jobs = self.get_running_jobs()
+                if len(current_jobs) != len(jobs):
+                    # Job list changed, need to recreate layout
+                    doc.clear()
+                    self.create_bokeh_app(doc)
         
         doc.add_periodic_callback(update_job_list, 30000)  # Check every 30 seconds
     
 
     def monitor_all_jobs(self, duration=None):
         """Monitor all running jobs with real-time updates"""
-        jobs = self.get_running_jobs()
+        self._monitoring_in_progress = True
         
-        if not jobs:
-            print(f"No running GPU jobs found for user {self.username}")
-            return
-        
-        print(f"Found {len(jobs)} running GPU jobs for user {self.username}")
+        try:
+            jobs = self.get_running_jobs()
+            
+            if not jobs:
+                print(f"No running GPU jobs found for user {self.username}")
+                return {}
+            
+            print(f"Found {len(jobs)} running GPU jobs for user {self.username}")
 
-        # Initialize results queue for collecting job data
-        results_queue = queue.Queue()
-        
-        # Start monitoring threads
-        with ThreadPoolExecutor(max_workers=len(jobs)) as executor:
-            futures = []
+            # Initialize results queue for collecting job data
+            results_queue = queue.Queue()
             
-            for job in jobs:
-                future = executor.submit(self.monitor_job, job, results_queue)
-                futures.append(future)
-            
-            # Monitor for specified duration or until interrupted
-            start_time = time.time()
-            
-            try:
-                if duration:
-                    time.sleep(duration)
-                else:
-                    print("Monitoring jobs... Press Ctrl+C to stop")
-                    # Keep monitoring until interrupted
-                    while True:
-                        time.sleep(1)
-                        # Check if any jobs are still running
-                        current_jobs = self.get_running_jobs()
-                        if not current_jobs:
-                            print("All jobs completed")
-                            break
-                        
-            except KeyboardInterrupt:
-                print("\nStopping monitoring...")
-            
-            # Stop monitoring
-            self.stop_monitoring = True
-            
-            # Wait for all threads to complete
-            for future in as_completed(futures):
+            # Start monitoring threads
+            with ThreadPoolExecutor(max_workers=len(jobs)) as executor:
+                self.executor = executor
+                futures = []
+                
+                for job in jobs:
+                    future = executor.submit(self.monitor_job, job, results_queue)
+                    futures.append(future)
+                
+                # Monitor for specified duration or until interrupted
+                start_time = time.time()
+                
                 try:
-                    future.result()
-                except Exception as e:
-                    print(f"Error in monitoring thread: {e}")
-        
-        # Collect results
-        all_job_data = {}
-        while not results_queue.empty():
-            job_data = results_queue.get()
-            all_job_data.update(job_data)
-        
-        return all_job_data
+                    if duration:
+                        # Wait for duration or shutdown event
+                        if self.shutdown_event.wait(timeout=duration):
+                            print("Shutdown requested during timed monitoring")
+                    else:
+                        print("Monitoring jobs... Press Ctrl+C to stop")
+                        # Keep monitoring until interrupted or no jobs remain
+                        while not self.shutdown_event.is_set():
+                            time.sleep(1)
+                            # Check if any jobs are still running
+                            current_jobs = self.get_running_jobs()
+                            if not current_jobs:
+                                print("All jobs completed")
+                                break
+                            
+                except KeyboardInterrupt:
+                    print("\nKeyboardInterrupt received in monitor_all_jobs")
+                    self.stop_monitoring = True
+                    self.shutdown_event.set()
+                
+                # Stop monitoring
+                print("Stopping job monitoring...")
+                self.stop_monitoring = True
+                self.shutdown_event.set()
+                
+                # Wait for all threads to complete with timeout
+                print("Waiting for monitoring threads to complete...")
+                completed_count = 0
+                for future in as_completed(futures, timeout=10):
+                    try:
+                        future.result()
+                        completed_count += 1
+                    except Exception as e:
+                        print(f"Error in monitoring thread: {e}")
+                        completed_count += 1
+                
+                print(f"Completed {completed_count}/{len(futures)} monitoring threads")
+            
+            # Collect results
+            all_job_data = {}
+            while not results_queue.empty():
+                job_data = results_queue.get()
+                all_job_data.update(job_data)
+            
+            return all_job_data
+            
+        finally:
+            self._monitoring_in_progress = False
+
     
     def save_data(self, job_data, filename):
         """Save monitoring data to CSV"""

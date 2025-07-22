@@ -18,7 +18,8 @@ import threading
 import logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
-
+# Importing necessary libraries for SLURM job monitoring
+from slurm_job_process_mapper import SlurmJobProcessMapper
 
 # Importing plotting libraries for real-time visualization
 # Using matplotlib for static plots and bokeh for interactive plots
@@ -63,6 +64,8 @@ class SlurmGPUMonitor:
         self.shutdown_event = threading.Event()  # Event for coordinated shutdown
         self.bokeh_server = None
         self.executor = None
+        # the slurm job process mapper instance
+        self.job_process_mapper = SlurmJobProcessMapper()
         
         # Set up signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -138,27 +141,33 @@ class SlurmGPUMonitor:
             return []
     
     
-    def get_job_processes(self, node, job_id):
-        """Get processes running on a node for a specific job"""
-        try:
-            # SSH options to handle host key verification
-            ssh_opts = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+    # def get_job_processes(self, node, job_id):
+    #     """Get processes running on a node for a specific job"""
+    #     try:
+    #         # SSH options to handle host key verification
+    #         ssh_opts = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
             
-            # Get processes for the job
-            cmd = f"ssh {ssh_opts} {node} 'ps -eo pid,ppid,cmd --no-headers | grep -v grep'"
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    #         # Get processes for the job
+    #         cmd = f"ssh {ssh_opts} {node} 'ps -eo pid,ppid,cmd --no-headers | grep -v grep'"
+    #         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
             
-            if result.returncode != 0:
-                return []
+    #         logging.info(f"Running command to get job processes on {node}: {cmd}")
+    #         logging.info(f"Command output: {result.stdout.strip()}")
+            
+    #         if result.returncode != 0:
+    #             return []
                 
-            # Also get SLURM job info to identify job processes
-            slurm_cmd = f"ssh {ssh_opts} {node} 'scontrol show job {job_id}'"
-            slurm_result = subprocess.run(slurm_cmd, shell=True, capture_output=True, text=True)
+    #         # Also get SLURM job info to identify job processes
+    #         slurm_cmd = f"ssh {ssh_opts} {node} 'scontrol show job {job_id}'"
+    #         slurm_result = subprocess.run(slurm_cmd, shell=True, capture_output=True, text=True)
             
-            return result.stdout.strip().split('\n')
-        except Exception as e:
-            logging.error(f"Error getting job processes for {node}: {e}")
-            return []
+    #         logging.info(f"Running command to get SLURM job info on {node}: {slurm_cmd}")
+    #         logging.info(f"Command output: {slurm_result.stdout.strip()}")
+            
+    #         return result.stdout.strip().split('\n')
+    #     except Exception as e:
+    #         logging.error(f"Error getting job processes for {node}: {e}")
+    #         return []
     
     
     def get_gpu_processes(self, node):
@@ -269,7 +278,8 @@ class SlurmGPUMonitor:
         """Identify which GPU is being used by a specific job"""
         try:
             # Get job processes
-            job_processes = self.get_job_processes(node, job_id)
+            # job_processes = self.get_job_processes(node, job_id)
+            job_processes = self.job_process_mapper.get_job_processes(node, job_id, user_id=self.username)
             
             # Get GPU processes
             gpu_processes = self.get_gpu_processes(node)

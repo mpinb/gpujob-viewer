@@ -75,7 +75,7 @@ class SlurmJobProcessMapper:
 
     def _get_slurm_job_info(self, node: str, job_id: str) -> Dict:
         """Get SLURM job information."""
-        cmd = f"ssh {self.ssh_opts} {node} 'scontrol show job {job_id}'"
+        cmd = f"scontrol show job {job_id}"
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         
         logging.info(f"Getting SLURM job info: {cmd}")
@@ -215,7 +215,7 @@ class SlurmJobProcessMapper:
         """Get processes for all SLURM jobs running on a node."""
         try:
             # Get all running jobs on the node
-            cmd = f"ssh {self.ssh_opts} {node} 'squeue -h -w {node} -o \"%i %u\"'"
+            cmd = f"squeue -h -w {node} -o \"%i %u\""
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
             
             if result.returncode != 0:

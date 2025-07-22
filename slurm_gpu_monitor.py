@@ -105,6 +105,9 @@ class SlurmGPUMonitor:
             cmd = f"squeue -u {self.username} -o '%A %T %N %P %j' --noheader"
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
             
+            logging.info(f"Running command to get running jobs: {cmd}")
+            logging.info(f"Command output: {result.stdout.strip()}")
+            
             if result.returncode != 0:
                 logging.error(f"Error getting job info: {result.stderr}")
                 return []

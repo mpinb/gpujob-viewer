@@ -33,19 +33,24 @@ class SlurmJobProcessMapper:
             
             # Method 1: Use cgroups (most reliable for modern SLURM)
             processes_cgroup = self._get_processes_from_cgroup(node, base_job_id, array_task_id)
+            logging.debug(f"Processes from cgroup for job {job_id}: {processes_cgroup}")
             
             # Method 2: Use SLURM_JOB_ID environment variable
             processes_env = self._get_processes_from_env(node, base_job_id, array_task_id)
+            logging.debug(f"Processes from environment for job {job_id}: {processes_env}")
             
             # Method 3: Use process tree from job step PIDs
             processes_tree = self._get_processes_from_tree(node, job_info)
+            logging.debug(f"Processes from process tree for job {job_id}: {processes_tree}")
             
             # Combine and deduplicate results
             all_processes = self._merge_process_lists(processes_cgroup, processes_env, processes_tree)
+            logging.debug(f"Combined processes for job {job_id}: {all_processes}")
             
             # Filter by user if specified
             if user_id:
                 all_processes = self._filter_processes_by_user(node, all_processes, user_id)
+                logging.debug(f"Filtered processes for job {job_id} by user {user_id}: {all_processes}")
             
             return {
                 "job_id": job_id,

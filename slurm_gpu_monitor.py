@@ -61,7 +61,8 @@ class SlurmGPUMonitor:
         # Set up signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
-        
+    
+    
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals gracefully"""
         print(f"\nReceived signal {signum}. Initiating graceful shutdown...")
@@ -84,7 +85,8 @@ class SlurmGPUMonitor:
         # Otherwise exit immediately
         print("Shutdown complete.")
         sys.exit(0)
-        
+    
+    
     def get_running_jobs(self):
         """Get running GPU jobs for the specified user"""
         try:
@@ -126,18 +128,22 @@ class SlurmGPUMonitor:
             print(f"Error getting running jobs: {e}")
             return []
     
+    
     def get_job_processes(self, node, job_id):
         """Get processes running on a node for a specific job"""
         try:
+            # SSH options to handle host key verification
+            ssh_opts = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+            
             # Get processes for the job
-            cmd = f"ssh {node} 'ps -eo pid,ppid,cmd --no-headers | grep -v grep'"
+            cmd = f"ssh {ssh_opts} {node} 'ps -eo pid,ppid,cmd --no-headers | grep -v grep'"
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
             
             if result.returncode != 0:
                 return []
                 
             # Also get SLURM job info to identify job processes
-            slurm_cmd = f"ssh {node} 'scontrol show job {job_id}'"
+            slurm_cmd = f"ssh {ssh_opts} {node} 'scontrol show job {job_id}'"
             slurm_result = subprocess.run(slurm_cmd, shell=True, capture_output=True, text=True)
             
             return result.stdout.strip().split('\n')
@@ -145,10 +151,14 @@ class SlurmGPUMonitor:
             print(f"Error getting job processes for {node}: {e}")
             return []
     
+    
     def get_gpu_processes(self, node):
         """Get GPU processes and their GPU assignments"""
         try:
-            cmd = f"ssh {node} 'nvidia-smi --query-compute-apps=pid,gpu_uuid,used_memory --format=csv,noheader,nounits'"
+            # SSH options to handle host key verification
+            ssh_opts = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+            
+            cmd = f"ssh {ssh_opts} {node} 'nvidia-smi --query-compute-apps=pid,gpu_uuid,used_memory --format=csv,noheader,nounits'"
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
             
             if result.returncode != 0:
@@ -169,10 +179,14 @@ class SlurmGPUMonitor:
             print(f"Error getting GPU processes for {node}: {e}")
             return {}
     
+    
     def get_gpu_info(self, node):
         """Get GPU information and mapping"""
         try:
-            cmd = f"ssh {node} 'nvidia-smi --query-gpu=index,uuid,name --format=csv,noheader'"
+            # SSH options to handle host key verification
+            ssh_opts = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+
+            cmd = f"ssh {ssh_opts} {node} 'nvidia-smi --query-gpu=index,uuid,name --format=csv,noheader'"
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
             
             if result.returncode != 0:
@@ -193,13 +207,17 @@ class SlurmGPUMonitor:
             print(f"Error getting GPU info for {node}: {e}")
             return {}
     
+    
     def get_gpu_utilization(self, node, gpu_index=None):
         """Get GPU utilization for specific GPU or all GPUs"""
         try:
+            # SSH options to handle host key verification
+            ssh_opts = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+            
             if gpu_index is not None:
-                cmd = f"ssh {node} 'nvidia-smi --id={gpu_index} --query-gpu=timestamp,name,utilization.gpu,utilization.memory,memory.total,memory.used --format=csv,noheader'"
+                cmd = f"ssh {ssh_opts} {node} 'nvidia-smi --id={gpu_index} --query-gpu=timestamp,name,utilization.gpu,utilization.memory,memory.total,memory.used --format=csv,noheader'"
             else:
-                cmd = f"ssh {node} 'nvidia-smi --query-gpu=timestamp,name,utilization.gpu,utilization.memory,memory.total,memory.used --format=csv,noheader'"
+                cmd = f"ssh {ssh_opts} {node} 'nvidia-smi --query-gpu=timestamp,name,utilization.gpu,utilization.memory,memory.total,memory.used --format=csv,noheader'"
             
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
             
@@ -224,6 +242,7 @@ class SlurmGPUMonitor:
         except Exception as e:
             print(f"Error getting GPU utilization for {node}: {e}")
             return []
+    
     
     def identify_job_gpu(self, node, job_id):
         """Identify which GPU is being used by a specific job"""

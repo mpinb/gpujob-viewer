@@ -16,7 +16,7 @@ import threading
 
 # Adding a logging library for better debugging and error handling
 import logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
 
@@ -35,7 +35,7 @@ try:
     from bokeh.io import output_file, save
     BOKEH_AVAILABLE = True
 except ImportError:
-    print("Bokeh is not available for live GPU monitoring.")
+    logging.warning("Bokeh is not available for live GPU monitoring.")
     BOKEH_AVAILABLE = False
 
 # Importing matplotlib and set flag if it is available
@@ -45,7 +45,7 @@ try:
     import matplotlib.pyplot as plt
     MATPLOTLIB_AVAILABLE = True
 except ImportError:
-    print("Matplotlib is not available for plotting.")
+    logging.warning("Matplotlib is not available for plotting.")
     MATPLOTLIB_AVAILABLE = False
 
 # Define the main class for monitoring SLURM GPU jobs
@@ -74,25 +74,25 @@ class SlurmGPUMonitor:
     
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals gracefully"""
-        print(f"\nReceived signal {signum}. Initiating graceful shutdown...")
+        logging.info(f"\nReceived signal {signum}. Initiating graceful shutdown...")
         self.stop_monitoring = True
         self.shutdown_event.set()
         
         # Stop Bokeh server if running
         if self.bokeh_server:
-            print("Stopping Bokeh server...")
+            logging.info("Stopping Bokeh server...")
             try:
                 self.bokeh_server.stop()
             except Exception as e:
-                print(f"Error stopping Bokeh server: {e}")
+                logging.error(f"Error stopping Bokeh server: {e}")
         
         # If we're in the middle of monitoring, let it clean up
         if hasattr(self, '_monitoring_in_progress') and self._monitoring_in_progress:
-            print("Waiting for monitoring threads to complete...")
+            logging.info("Waiting for monitoring threads to complete...")
             return
         
         # Otherwise exit immediately
-        print("Shutdown complete.")
+        logging.info("Shutdown complete.")
         sys.exit(0)
     
     
@@ -103,7 +103,7 @@ class SlurmGPUMonitor:
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
             
             if result.returncode != 0:
-                print(f"Error getting job info: {result.stderr}")
+                logging.error(f"Error getting job info: {result.stderr}")
                 return []
                 
             jobs = []
@@ -115,7 +115,7 @@ class SlurmGPUMonitor:
                         job_name = ' '.join(parts[4:]) if len(parts) > 4 else 'Unknown'
                         
                         # Debug output
-                        print(f"Debug: Processing job {job_id}, status: '{status}', node: '{node}', partition: '{partition_found}'")
+                        logging.debug(f"Processing job {job_id}, status: '{status}', node: '{node}', partition: '{partition_found}'")
                         
                         # Check for both 'R' and 'RUNNING' status
                         if (status in ['R', 'RUNNING']) and partition_found == self.partition:
@@ -126,15 +126,15 @@ class SlurmGPUMonitor:
                                 'partition': partition_found,
                                 'job_name': job_name
                             })
-                            print(f"Debug: Added job {job_id} to monitoring list")
+                            logging.debug(f"Added job {job_id} to monitoring list")
                         else:
-                            print(f"Debug: Skipped job {job_id} - status: '{status}', partition: '{partition_found}' (looking for '{self.partition}')")
+                            logging.debug(f"Skipped job {job_id} - status: '{status}', partition: '{partition_found}' (looking for '{self.partition}')")
                             
-            print(f"Debug: Total jobs found for monitoring: {len(jobs)}")
+            logging.debug(f"Total jobs found for monitoring: {len(jobs)}")
             return jobs
             
         except Exception as e:
-            print(f"Error getting running jobs: {e}")
+            logging.error(f"Error getting running jobs: {e}")
             return []
     
     
@@ -157,7 +157,7 @@ class SlurmGPUMonitor:
             
             return result.stdout.strip().split('\n')
         except Exception as e:
-            print(f"Error getting job processes for {node}: {e}")
+            logging.error(f"Error getting job processes for {node}: {e}")
             return []
     
     
@@ -189,7 +189,7 @@ class SlurmGPUMonitor:
                         }
             return gpu_processes
         except Exception as e:
-            print(f"Error getting GPU processes for {node}: {e}")
+            logging.error(f"Error getting GPU processes for {node}: {e}")
             return {}
     
     
@@ -221,7 +221,7 @@ class SlurmGPUMonitor:
                         }
             return gpu_info
         except Exception as e:
-            print(f"Error getting GPU info for {node}: {e}")
+            logging.error(f"Error getting GPU info for {node}: {e}")
             return {}
     
     
@@ -261,7 +261,7 @@ class SlurmGPUMonitor:
                         })
             return utilization_data
         except Exception as e:
-            print(f"Error getting GPU utilization for {node}: {e}")
+            logging.error(f"Error getting GPU utilization for {node}: {e}")
             return []
     
     
@@ -381,12 +381,12 @@ class SlurmGPUMonitor:
                     break
                 
             except Exception as e:
-                print(f"Error monitoring job {job_id}: {e}")
+                logging.error(f"Error monitoring job {job_id}: {e}")
                 if self.shutdown_event.wait(timeout=self.monitoring_interval):
                     break
         
         results_queue.put({job_id: job_data})
-        print(f"Finished monitoring job {job_id}")
+        logging.info(f"Finished monitoring job {job_id}")
 
 
     def create_bokeh_app(self, doc):
@@ -459,10 +459,10 @@ class SlurmGPUMonitor:
             jobs = self.get_running_jobs()
             
             if not jobs:
-                print(f"No running GPU jobs found for user {self.username}")
+                logging.info(f"No running GPU jobs found for user {self.username}")
                 return {}
             
-            print(f"Found {len(jobs)} running GPU jobs for user {self.username}")
+            logging.info(f"Found {len(jobs)} running GPU jobs for user {self.username}")
 
             # Initialize results queue for collecting job data
             results_queue = queue.Queue()
@@ -483,40 +483,40 @@ class SlurmGPUMonitor:
                     if duration:
                         # Wait for duration or shutdown event
                         if self.shutdown_event.wait(timeout=duration):
-                            print("Shutdown requested during timed monitoring")
+                            logging.info("Shutdown requested during timed monitoring")
                     else:
-                        print("Monitoring jobs... Press Ctrl+C to stop")
+                        logging.info("Monitoring jobs... Press Ctrl+C to stop")
                         # Keep monitoring until interrupted or no jobs remain
                         while not self.shutdown_event.is_set():
                             time.sleep(1)
                             # Check if any jobs are still running
                             current_jobs = self.get_running_jobs()
                             if not current_jobs:
-                                print("All jobs completed")
+                                logging.info("All jobs completed")
                                 break
                             
                 except KeyboardInterrupt:
-                    print("\nKeyboardInterrupt received in monitor_all_jobs")
+                    logging.info("\nKeyboardInterrupt received in monitor_all_jobs")
                     self.stop_monitoring = True
                     self.shutdown_event.set()
                 
                 # Stop monitoring
-                print("Stopping job monitoring...")
+                logging.info("Stopping job monitoring...")
                 self.stop_monitoring = True
                 self.shutdown_event.set()
                 
                 # Wait for all threads to complete with timeout
-                print("Waiting for monitoring threads to complete...")
+                logging.info("Waiting for monitoring threads to complete...")
                 completed_count = 0
                 for future in as_completed(futures, timeout=10):
                     try:
                         future.result()
                         completed_count += 1
                     except Exception as e:
-                        print(f"Error in monitoring thread: {e}")
+                        logging.error(f"Error in monitoring thread: {e}")
                         completed_count += 1
                 
-                print(f"Completed {completed_count}/{len(futures)} monitoring threads")
+                logging.info(f"Completed {completed_count}/{len(futures)} monitoring threads")
             
             # Collect results
             all_job_data = {}
@@ -533,7 +533,7 @@ class SlurmGPUMonitor:
     def save_data(self, job_data, filename):
         """Save monitoring data to CSV"""
         if not job_data:
-            print("No data to save")
+            logging.info("No data to save")
             return
         
         # Flatten data for CSV
@@ -544,12 +544,12 @@ class SlurmGPUMonitor:
         if all_data:
             df = pd.DataFrame(all_data)
             df.to_csv(filename, index=False)
-            print(f"Data saved to {filename}")
+            logging.info(f"Data saved to {filename}")
     
     def generate_report(self, job_data, output_dir="gpu_monitoring_report"):
         """Generate analysis report and plots"""
         if not job_data:
-            print("No data to analyze")
+            logging.info("No data to analyze")
             return
         
         os.makedirs(output_dir, exist_ok=True)
@@ -560,7 +560,7 @@ class SlurmGPUMonitor:
             all_data.extend(data_points)
         
         if not all_data:
-            print("No data points to analyze")
+            logging.warning("No data points to analyze")
             return
             
         df = pd.DataFrame(all_data)
@@ -614,7 +614,7 @@ class SlurmGPUMonitor:
                 f.write(f"  Average Memory Used: {stats['avg_memory_used_gb']:.2f} GB\n")
                 f.write(f"  Maximum Memory Used: {stats['max_memory_used_gb']:.2f} GB\n\n")
         
-        print(f"Report generated in {output_dir}/")
+        logging.info(f"Report generated in {output_dir}/")
 
     def create_plots(self, df, output_dir):
         """Create visualization plots using selected backend"""
@@ -623,7 +623,7 @@ class SlurmGPUMonitor:
         elif self.plotting_backend == 'bokeh':
             self.create_bokeh_plots(df, output_dir)
         else:
-            print("No plotting backend available")
+            logging.warning("No plotting backend available")
     
     def create_matplotlib_plots(self, df, output_dir):
         """Create visualization plots using matplotlib"""
@@ -831,13 +831,13 @@ class SlurmGPUMonitor:
                 layout = column(p1, p2)
                 save(layout)
         
-        print(f"Bokeh plots saved to {output_dir}/")
+        logging.info(f"Bokeh plots saved to {output_dir}/")
 
 
     def start_bokeh_server(self, port=5006, output_dir="gpu_monitoring_output"):
         """Start Bokeh server for real-time monitoring"""
         if not BOKEH_AVAILABLE:
-            print("Bokeh not available. Cannot start real-time server.")
+            logging.warning("Bokeh not available. Cannot start real-time server.")
             return None
         
         # Create Bokeh application
@@ -847,10 +847,8 @@ class SlurmGPUMonitor:
         server = Server({'/': app}, port=port, allow_websocket_origin=[f"localhost:{port}"], output_dir=output_dir)
         server.start()
         
-        print(f"Bokeh server started on http://localhost:{port}")
-        print("Real-time monitoring dashboard is now available!")
-        print("Access the dashboard at http://localhost:{port}/gpu_monitoring_dashboard.html")
-        server.io_loop.add_callback(server.show, "/gpu_monitoring_dashboard.html")  # Open the dashboard in a browser
+        logging.info(f"Bokeh server started on http://localhost:{port}")
+        logging.info("Real-time monitoring dashboard is now available!")
         server.io_loop.start()
         # Return server instance for potential stopping later
         self.bokeh_server = server
@@ -861,7 +859,7 @@ class SlurmGPUMonitor:
         """Stop the Bokeh server if running"""
         if hasattr(self, 'bokeh_server') and self.bokeh_server:
             self.bokeh_server.stop()
-            print("Bokeh server stopped")
+            logging.info("Bokeh server stopped")
         return None
 
 
@@ -883,7 +881,7 @@ def main():
     monitor = SlurmGPUMonitor(args.username, args.partition, args.interval)
     
     # Monitor jobs
-    print(f"Starting GPU monitoring for user: {args.username}")
+    logging.info(f"Starting GPU monitoring for user: {args.username}")
     if args.backend == 'bokeh':
         monitor.plotting_backend = 'bokeh'
     else:
@@ -894,7 +892,7 @@ def main():
         output_file(f"{args.output_dir}/gpu_monitoring_dashboard.html")
         monitor.start_bokeh_server(args.bokeh_port, args.output_dir)
     else:
-        print(f"Using {args.backend} for plotting. Results will be saved in {args.output_dir}/")
+        logging.info(f"Using {args.backend} for plotting. Results will be saved in {args.output_dir}/")
     # Create output directory if it doesn't exist
     os.makedirs(args.output_dir, exist_ok=True)
     
@@ -911,9 +909,9 @@ def main():
         
         # Generate report
         monitor.generate_report(job_data, args.output_dir)
-        print(f"Monitoring complete. Results saved to {args.output_dir}/")
+        logging.info(f"Monitoring complete. Results saved to {args.output_dir}/")
     else:
-        print("No data collected")
+        logging.warning("No data collected")
 
 
 if __name__ == "__main__":

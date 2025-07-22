@@ -294,11 +294,12 @@ class SlurmGPUMonitor:
                                 'pid': pid,
                                 'used_memory': gpu_processes[pid]['used_memory']
                             }
+                            logging.info(f"Identified job {job_id} on node {node} using GPU {gpu_index} (UUID: {gpu_uuid}, Name: {gpu_info[gpu_uuid]['name']})")
                             break
             
             return job_gpu_mapping
         except Exception as e:
-            print(f"Error identifying job GPU for {node}, job {job_id}: {e}")
+            logging.warning(f"Error identifying job GPU for {node}, job {job_id}: {e}")
             return {}
     
     
@@ -332,7 +333,7 @@ class SlurmGPUMonitor:
                             }
                             self.bokeh_sources[job_id]['mem_util_source'].data = new_data
                     except Exception as e:
-                        print(f"Error updating live data for job {job_id}: {e}")
+                        logging.warning(f"Error updating live data for job {job_id}: {e}")
 
 
     def monitor_job(self, job_info, results_queue):
@@ -340,18 +341,18 @@ class SlurmGPUMonitor:
         job_id = job_info['job_id']
         node = job_info['node']
         
-        print(f"Starting monitoring for job {job_id} on node {node}")
+        logging.info(f"Starting monitoring for job {job_id} on node {node}")
         
         # Identify which GPU this job is using
         job_gpu_mapping = self.identify_job_gpu(node, job_id)
         
         if not job_gpu_mapping:
-            print(f"Could not identify GPU for job {job_id} on node {node}")
+            logging.info(f"Could not identify GPU for job {job_id} on node {node}")
             # Monitor all GPUs as fallback
             gpu_index = None
         else:
             gpu_index = job_gpu_mapping[job_id]['gpu_index']
-            print(f"Job {job_id} is using GPU {gpu_index} on node {node}")
+            logging.info(f"Job {job_id} is using GPU {gpu_index} on node {node}")
         
         job_data = []
         start_time = time.time()
